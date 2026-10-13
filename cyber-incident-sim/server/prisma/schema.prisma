@@ -1,0 +1,357 @@
+// Initial data model for the Cyber Incident Response Simulator.
+//
+// Scenario vs Incident:
+//   Scenario = reusable blueprint. Holds ground truth (root cause, affected
+//              systems, required actions, scoring rules) plus templates used
+//              to generate events/evidence for any Incident created from it.
+//   Incident = one instantiated, playable run of a Scenario. Owns its own
+//              generated events/systems/evidence and its own Investigations.
+// Many Incidents can be created from the same Scenario, each independent.
+//
+// This schema defines structure only — business logic (auth, scoring,
+// event generation, action validation) is implemented module-by-module in
+// later milestones.
+
+generator client {
+  provider = "prisma-client-js"
+  // node:20-alpine ships musl libc + OpenSSL 3.x, not OpenSSL 1.1.
+  // Without an explicit target, Prisma tries to auto-detect the OpenSSL
+  // version at generate time and silently falls back to the wrong engine
+  // if detection fails (see server/Dockerfile for the other half of this
+  // fix). Declaring it here makes the generated engine deterministic
+  // regardless of what detection would have guessed.
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────────────────────────────────
+
+enum Role {
+  STUDENT
+  INSTRUCTOR
+  ADMIN
+}
+
+enum Difficulty {
+  EASY
+  MEDIUM
+  HARD
+}
+
+enum Severity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum IncidentStatus {
+  DETECTED
+  INVESTIGATING
+  IDENTIFIED
+  CONTAINMENT
+  ERADICATION
+  RECOVERY
+  CLOSED
+}
+
+enum InvestigationStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  SUBMITTED
+  COMPLETED
+}
+
+enum SystemStatus {
+  NORMAL
+  SUSPICIOUS
+  CRITICAL
+  COMPROMISED
+  ISOLATED
+}
+
+enum EvidenceRelevance {
+  UNMARKED
+  RELEVANT
+  NOT_RELEVANT
+  NEEDS_INVESTIGATION
+}
+
+enum ActionType {
+  DISABLE_ACCOUNT
+  RESET_CREDENTIALS
+  BLOCK_IP
+  ISOLATE_SYSTEM
+  TERMINATE_PROCESS
+  BLOCK_NETWORK_CONNECTION
+  REVIEW_USER_ACTIVITY
+  ESCALATE_INCIDENT
+  CLOSE_INCIDENT
+}
+
+enum AIInteractionType {
+  SCENARIO_GENERATION
+  HINT
+  FEEDBACK
+  REPORT_GENERATION
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Core entities
+// ─────────────────────────────────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         Role     @default(STUDENT)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  investigations Investigation[]
+  reports        Report[]
+  auditLogs      AuditLog[]
+  sessions       Session[]
+
+  @@index([role])
+}
+
+model Session {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tokenHash  String   @unique
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  lastUsedAt DateTime?
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Scenario {
+  id                String     @id @default(uuid())
+  name              String
+  description       String
+  attackType        String
+  difficulty        Difficulty
+  severity          Severity
+  rootCause         String
+  initialAccess     String
+  affectedSystems   String[]
+  requiredActions   ActionType[]
+  scoringRules      Json
+  eventTemplate     Json
+  evidenceTemplate  Json
+  isPublished       Boolean    @default(false)
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  incidents Incident[]
+}
+
+model Incident {
+  id          String         @id @default(uuid())
+  scenarioId  String
+  scenario    Scenario       @relation(fields: [scenarioId], references: [id], onDelete: Restrict)
+
+  title       String
+  description String
+  type        String
+  difficulty  Difficulty
+  severity    Severity
+  status      IncidentStatus @default(DETECTED)
+
+  startTime DateTime?
+  endTime   DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  securityEvents  SecurityEvent[]
+  systems         System[]
+  evidence        Evidence[]
+  investigations  Investigation[]
+
+  @@index([scenarioId])
+  @@index([status])
+}
+
+model System {
+  id         String       @id @default(uuid())
+  incidentId String
+  incident   Incident     @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+
+  name       String
+  type       String
+  status     SystemStatus @default(NORMAL)
+  metadata   Json?
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+
+  @@index([incidentId])
+}
+
+model SecurityEvent {
+  id            String   @id @default(uuid())
+  incidentId    String
+  incident      Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+
+  eventType      String
+  severity       Severity
+  sourceSystem   String
+  user           String?
+  sourceIP       String?
+  destinationIP  String?
+  description    String
+  metadata       Json?
+  timestamp      DateTime
+  createdAt      DateTime @default(now())
+
+  @@index([incidentId, timestamp])
+}
+
+model Evidence {
+  id         String   @id @default(uuid())
+  incidentId String
+  incident   Incident @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+
+  type        String
+  severity    Severity
+  description String
+  source      String
+  timestamp   DateTime
+  createdAt   DateTime @default(now())
+
+  @@index([incidentId])
+}
+
+model Investigation {
+  id         String              @id @default(uuid())
+  userId     String
+  user       User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  incidentId String
+  incident   Incident            @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+
+  status      InvestigationStatus @default(NOT_STARTED)
+  startedAt   DateTime?
+  completedAt DateTime?
+  hintsUsed   Int                 @default(0)
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  actions        InvestigationAction[]
+  findings       Finding[]
+  hints          Hint[]
+  score          Score?
+  report         Report?
+  aiInteractions AIInteraction[]
+
+  @@index([userId, incidentId])
+}
+
+model InvestigationAction {
+  id              String        @id @default(uuid())
+  investigationId String
+  investigation   Investigation @relation(fields: [investigationId], references: [id], onDelete: Cascade)
+
+  actionType String
+  targetId   String?
+  wasValid   Boolean?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([investigationId, createdAt])
+}
+
+model Finding {
+  id              String        @id @default(uuid())
+  investigationId String
+  investigation   Investigation @relation(fields: [investigationId], references: [id], onDelete: Cascade)
+
+  category    String
+  content     String
+  isCorrect   Boolean?
+  createdAt   DateTime @default(now())
+
+  @@index([investigationId])
+}
+
+model Hint {
+  id              String        @id @default(uuid())
+  investigationId String
+  investigation   Investigation @relation(fields: [investigationId], references: [id], onDelete: Cascade)
+
+  level     Int
+  content   String
+  createdAt DateTime @default(now())
+
+  @@index([investigationId])
+}
+
+model Score {
+  id              String        @id @default(uuid())
+  investigationId String        @unique
+  investigation   Investigation @relation(fields: [investigationId], references: [id], onDelete: Cascade)
+
+  detectionScore    Int
+  rootCauseScore    Int
+  affectedSystemScore Int
+  containmentScore  Int
+  remediationScore  Int
+  reportScore       Int
+  penaltyPoints     Int
+  totalScore        Int
+  breakdown         Json
+  createdAt         DateTime @default(now())
+}
+
+model Report {
+  id              String        @id @default(uuid())
+  investigationId String        @unique
+  investigation   Investigation @relation(fields: [investigationId], references: [id], onDelete: Cascade)
+  userId          String
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  content   Json
+  pdfPath   String?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model AIInteraction {
+  id              String             @id @default(uuid())
+  investigationId String?
+  investigation   Investigation?     @relation(fields: [investigationId], references: [id], onDelete: SetNull)
+
+  type      AIInteractionType
+  prompt    Json
+  response  Json
+  succeeded Boolean
+  createdAt DateTime @default(now())
+
+  @@index([investigationId])
+  @@index([type])
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  action    String
+  metadata  Json?
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([action])
+}
